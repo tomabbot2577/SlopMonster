@@ -236,6 +236,14 @@ def lens_listing():
         for f in files:
             if not f.endswith('.md') or f.startswith('_'):
                 continue
+            # A lens opens with a frontmatter fence. A README or a notes file in a
+            # pack directory does not, and must not be offered as a lens.
+            try:
+                with open(os.path.join(d, f), encoding='utf-8') as fh:
+                    if fh.readline().strip() != '---':
+                        continue
+            except OSError:
+                continue
             name = f[:-3]
             if name in seen:
                 continue

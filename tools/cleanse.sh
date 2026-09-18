@@ -78,6 +78,7 @@ lens_names() {  # every lens on the path and where it came from, first hit wins
       [ -f "$f" ] || continue
       b="$(basename "$f" .md)"
       case "$b" in _*) continue ;; esac
+      [ "$(head -n 1 "$f")" = "---" ] || continue   # a lens opens with frontmatter
       case "$seen" in *" $b "*) continue ;; esac
       seen="$seen$b "
       printf '%s (%s) ' "$b" "$d"
