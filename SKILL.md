@@ -58,8 +58,11 @@ this a good offer" or "investor pitch" means `business-eval`. "Editorial", "essa
 means `editorial`. Anything else is `marketing`. A lens that is not installed
 is a pack lens: say so, offer the pack link from the README, and fall back to `marketing`.
 
-Propose your set with one line of reason per lens, plus any lens you weighed and dropped and
-why. Where `AskUserQuestion` is available, ask there with `multiSelect` on, the recommended
+Before you propose, run a Johari window on the draft: what you know about it, what the
+author knows that you do not (ask), what you are assuming without noticing, and what could
+surprise you once the lint runs. Let the second answer shape the question you ask and the
+fourth shape what you check first. Then propose your set with one line of reason per lens,
+plus any lens you weighed and dropped and why. Where `AskUserQuestion` is available, ask there with `multiSelect` on, the recommended
 set first and each of those marked `(Recommended)`. In a plain chat, ask in one short message
 and wait. Skip the question only when the request already named the lenses, as "de-slop this
 as a lawyer" does, or when `--lens NAME` was passed; then say which lens you have and carry on.
