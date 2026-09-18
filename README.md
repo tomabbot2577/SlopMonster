@@ -86,6 +86,11 @@ No dependencies. The scorer is stdlib Python. The cleanse script needs one AI CL
 "de-slop this". **Codex / other agents:** point the agent at `SKILL.md` — it is
 plain-markdown instructions, nothing Claude-specific.
 
+**Keeping your own lenses.** Put them in a private repo and clone or symlink it to
+`lenses.local/`, which is gitignored and searched before `lenses/`. Upstream fixes to the
+scorer, the prompt or the tests then pull straight in, and your writing never sits in a
+branch of somebody else's repo. See [Where lenses live](#where-lenses-live).
+
 ## The cleanse is model-aware
 
 The rule: the cleanse runs on a **different model family** than the one that wrote the
@@ -103,6 +108,101 @@ the one thing this step exists to prevent.
 
 Then it re-lints, always: a frontier model is very good at removing tells and quite
 capable of adding new ones while it does.
+
+## Lenses
+
+A lens is the viewpoint the loop works from. It does not change what counts as an AI tell.
+It changes what the line should say once the tell is gone, because a pitch and a contract
+clause do not want the same sentence.
+
+| Lens | For |
+|---|---|
+| `marketing` (default) | landing pages, product pages, emails, ads |
+| `business-eval` (pack) | offers, pitches, investor memos, anything judged as a deal |
+| `legal` (pack) | contracts, policies, notices, anything a court may read one day |
+| `editorial` (pack) | essays, articles, op-eds, long-form argument |
+| `hormozi`, `utl` (pack) | offer copy through the Hormozi corpus; learning systems through UTL |
+
+```bash
+python3 tools/deslop.py --lens legal contract.md
+tools/cleanse.sh --lens editorial draft.md > cleansed.md
+DESLOP_LENS=business-eval python3 tools/deslop.py pitch.md
+```
+
+The five checks below are identical under every lens. A lens changes the rewrite
+principles, the register and Pass 3 the cleanse model is sent, and a short allow/extra
+vocabulary list for the words a domain uses literally. Nothing else moves. That is the
+whole design, because a gate that shifts with the viewpoint is not a gate.
+
+Write your own by copying [`lenses/_template.md`](lenses/_template.md). It is the contract
+every lens file follows, and it is three sections long.
+
+### Lens packs
+
+This repo ships `marketing` and the template. The lenses marked (pack) are sold
+separately: `business-eval`, `legal`, `editorial`, `hormozi`, `utl`, and the ones added
+each month. Each is a sourced, worked viewpoint with its own principles, cleanse overlay,
+triggers and vocabulary. One lens, a pick of three, or the whole set with a year of new
+ones: [needs link]. Install by cloning the pack to `lenses.local/`, as described below.
+
+### More than one lens
+
+A memo can be a pitch and a contract at the same time. Pass both, in order:
+
+```bash
+python3 tools/deslop.py --lens business-eval,legal memo.md
+tools/cleanse.sh --lens business-eval,legal memo.md > cleansed.md
+```
+
+The two vocabularies union. The proof rule is waived only if every lens named waives it,
+so the strictest lens in the set decides. The cleanse model gets both overlays in the
+order you typed them, under a line telling it the first listed lens wins where the
+registers disagree.
+
+### Where lenses live
+
+A lens NAME is searched for in each directory of `$DESLOP_LENS_PATH` (colon-separated),
+then `lenses.local/`, then `lenses/`. First hit wins, and a name containing a slash or
+ending in `.md` is a path used as given.
+
+That is the private-pack pattern. Your lens files are your own writing and your own
+clients, so keep them in a private repo and clone or symlink it to `lenses.local/`:
+
+```bash
+git clone git@github.com:you/my-lenses.git lenses.local
+# or, if it already lives somewhere else on disk
+ln -s ~/work/my-lenses lenses.local
+# or point at it without touching this repo at all
+export DESLOP_LENS_PATH=~/work/my-lenses:~/work/client-lenses
+```
+
+`lenses.local/` is in `.gitignore`, so nothing of yours can be committed here by accident.
+A private lens of the same name as a shipped one shadows it, which is how you override
+`marketing` without forking the file.
+
+### Picking the lens automatically
+
+`--lens auto` reads the draft, counts how often it hits each lens's `triggers:` list, and
+selects every lens with three hits or more, loudest first. Nothing over the floor falls
+back to `marketing`. The choice and the counts go to stderr:
+
+```bash
+python3 tools/deslop.py --lens auto draft.md
+# deslop: auto lens -> legal (7), business-eval (4)
+
+python3 tools/deslop.py --pick-lenses draft.md   # print the pick and stop
+# legal,business-eval
+```
+
+Triggers are declared on one frontmatter line: `triggers: escrow, indemnity, force
+majeure`. They are matched case-insensitively as whole words or whole phrases, so
+`escrow` does not fire on `escrowed`. A lens with no `triggers:` line never
+auto-selects, and no trigger ever changes a score.
+
+**If you are Claude reading this as a skill, pick the lenses yourself.** Read the draft,
+name the lenses it calls for and say why, then put that set to the user before you lint
+anything. `auto` is a word count and cannot tell a pitch from a post-mortem. It is the
+mechanical fallback for a build gate or a shell script, where nobody is there to read.
 
 ## What the scorer hunts
 
@@ -245,14 +345,15 @@ not go on the page.
 | **Alex Hormozi**, the offer side | named pain, checkable specificity, proof you actually own |
 
 Those three plus the category benchmark become five working principles, each with a real
-before and after: [`references/principles.md`](references/principles.md).
+before and after: [`lenses/marketing.md`](lenses/marketing.md).
 
 ## What goes in the tells' place
 
 Clean is not the same as good. Five principles decide what the line says instead —
 Krug's *Don't Make Me Think*, Priestley's problem-first pitch order, and the
 specificity-over-superlatives argument Hormozi makes from the offer side. Each with a
-real before/after: [`references/principles.md`](references/principles.md).
+real before/after: [`lenses/marketing.md`](lenses/marketing.md). Other lenses carry their
+own set.
 
 ## A full worked example
 
@@ -298,8 +399,14 @@ tools/test_deslop.py                regression suite. run it after touching any 
 tools/cleanse.sh                    rival-model cleanse, auto-routed, time-bound
 .github/workflows/slop.yml          the build gate, ready to copy
 prompts/cleanse.txt                 the exact instruction the cleanse model gets
+lenses/marketing.md                 the default lens: five principles, register, vocab
+lenses/business-eval.md             the offer and pitch lens
+lenses/legal.md                     the contract and policy lens
+lenses/editorial.md                 the essay and article lens
+lenses/_template.md                 the contract every lens file follows
+lenses.local/                       your private lens pack, gitignored, searched first
 references/signs-of-ai-writing.md   the full catalogue: 2 vocab tiers, 8 shapes, cadence, rhythm, proof
-references/principles.md            the five rewrite principles, each with a real pair
+references/principles.md            a pointer: the principles moved into the lenses
 references/sources.md               every source this stands on
 examples/ridgeline-roofing.md       full site build, every line before → after
 examples/jasper-live-run.md         unedited live run: 3/5 → 5/5 on a real page

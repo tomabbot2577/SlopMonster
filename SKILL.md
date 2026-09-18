@@ -19,12 +19,58 @@ because the linter is honest and the model is persuasive.
 4. RE-LINT   python3 tools/deslop.py again           ship only at 5/5
 ```
 
+## Lenses
+
+A lens is the viewpoint the loop works from. It does not change what counts as a tell. It
+changes what the line should say once the tell is gone.
+
+| Lens | For |
+|---|---|
+| `marketing` (default) | landing pages, product pages, emails, ads |
+| `business-eval` (pack) | offers, pitches, investor memos, anything judged as a deal |
+| `legal` (pack) | contracts, policies, notices, anything a court may read one day |
+| `editorial` (pack) | essays, articles, op-eds, long-form argument |
+| `hormozi`, `utl` (pack) | offer copy through the Hormozi corpus; learning systems through UTL |
+
+You pick the lens by reading the draft, and Step 0 is how. Several at once: `--lens
+legal,editorial`. The vocabularies union, the cleanse model gets both overlays in the order
+you listed them, and the first listed lens wins a clash of register. The five linter checks
+are identical under every lens. A lens changes the rewrite principles, the register and Pass
+3 the cleanse model is sent, and an allow/extra vocabulary list for words a domain uses
+literally.
+
+**Where lenses live.** A NAME is searched for in each directory of `$DESLOP_LENS_PATH`
+(colon-separated), then `lenses.local/`, then `lenses/`. First hit wins; a path ending in
+`.md` is used as given. The private-pack pattern: clone or symlink a private repo of lens
+files to `lenses.local/`, and each answers to its own name with none of your writing here.
+
+**Make your own lens.** Copy `lenses/_template.md` to `lenses/<name>.md` and fill in its
+three sections. The template is the contract. Then pass `--lens <name>` to both tools.
+
+## Step 0 — pick the lenses
+
+Read the draft first, then put your choice of lenses to the user. For a mechanical hint:
+`python3 tools/deslop.py --pick-lenses draft.md`, which prints a comma-separated list.
+
+`--pick-lenses` and `--lens auto` count trigger words. They do not read. Take the hint, then
+decide by meaning. "As a lawyer" or "legal review" means `legal`. "Business evaluation", "is
+this a good offer" or "investor pitch" means `business-eval`. "Editorial", "essay" or "op-ed"
+means `editorial`. Anything else is `marketing`. A lens that is not installed
+is a pack lens: say so, offer the pack link from the README, and fall back to `marketing`.
+
+Propose your set with one line of reason per lens, plus any lens you weighed and dropped and
+why. Where `AskUserQuestion` is available, ask there with `multiSelect` on, the recommended
+set first and each of those marked `(Recommended)`. In a plain chat, ask in one short message
+and wait. Skip the question only when the request already named the lenses, as "de-slop this
+as a lawyer" does, or when `--lens NAME` was passed; then say which lens you have and carry on.
+
 ## Step 1 — Lint
 
 ```bash
 python3 tools/deslop.py page.html              # a built page (scores visible text only)
 python3 tools/deslop.py page.html --view hero  # one element by id
 python3 tools/deslop.py --text "paste a draft"
+python3 tools/deslop.py --lens legal contract.md   # score under another lens
 python3 tools/deslop.py page.html --allow-proof  # numbers are real and evidenced
 ```
 
@@ -67,6 +113,7 @@ runs on a **different model family** than the one that wrote the draft:
 
 ```bash
 tools/cleanse.sh draft.md > cleansed.md                 # copy out, notes on stderr
+tools/cleanse.sh --lens legal draft.md > cleansed.md    # the lens sets the register
 tools/cleanse.sh draft.md > cleansed.md 2> notes.txt    # keep the notes as well
 ```
 

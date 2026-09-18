@@ -4,16 +4,34 @@
     python3 deslop.py index.html
     python3 deslop.py index.html --view view-site     # score one tab only
     python3 deslop.py --text "some copy to check"
+    python3 deslop.py --lens legal contract.md        # a different viewpoint
+    python3 deslop.py --lens legal,editorial memo.md  # several, first listed wins
+    python3 deslop.py --lens auto draft.md            # pick by the draft's triggers
+    python3 deslop.py --pick-lenses draft.md          # print that pick and stop
 
 This reads only what a visitor can SEE: it strips <script>, <style>, and every HTML
 tag, so it scores the words on the page rather than the markup around them.
 
 Scoring is out of 5. Below 5 exits non-zero. That is deliberate — "mostly clean"
 copy is how a page ends up sounding like every other AI page on the internet.
+
+All five checks run under every lens. A lens only edits the vocabulary catalogue:
+`allow_vocab` drops words this domain uses literally, `extra_vocab` adds tells this
+domain has, `allow_proof: true` does what --allow-proof does. A NAME is searched for
+in every directory of DESLOP_LENS_PATH (colon-separated), then lenses.local/, then
+lenses/; first hit wins. A path ending in .md is used as given. DESLOP_LENS sets the
+lens from the environment. Default `marketing`.
+
+Several lenses at once: `--lens a,b`. The vocabularies union, and the proof rule is
+waived only if every selected lens waives it.
 """
 import html as _html   # aliased: `visible_text` takes a parameter named `html`
+import os
 import re
 import sys
+
+# Where the paid lens packs live. Printed once, only when a lens is not found.
+LENS_PACK_URL = '[needs link]'
 
 # ── the catalogue ────────────────────────────────────────────────────────────
 # Grouped by why they are a tell, because the fix differs per group.
@@ -171,6 +189,204 @@ def read_utf8(path):
     return open(path, encoding='utf-8', errors='replace').read()
 
 
+# ── lenses ───────────────────────────────────────────────────────────────────
+# A lens is a markdown file. This tool reads two parts of it: the frontmatter
+# `triggers:` line and the `## Lint` block. Nothing else — the principles are for
+# the writer and the cleanse overlay is for the rival model. No YAML parser: four
+# keys, one line each, plain text.
+#
+# A NAME is resolved by searching, in order, every directory in DESLOP_LENS_PATH
+# (colon-separated), then lenses.local/, then lenses/. First hit wins. That is how
+# a private pack of lenses lives outside this repo: clone or symlink it to
+# lenses.local/, or point DESLOP_LENS_PATH at it, and NAME picks it up unchanged.
+# A NAME containing a path separator or ending in .md is a path, used directly.
+REPO_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..')
+LENS_DIR = os.path.join(REPO_ROOT, 'lenses')
+LENS_LOCAL_DIR = os.path.join(REPO_ROOT, 'lenses.local')
+LENS_DEFAULT = 'marketing'
+LENS_AUTO = 'auto'
+LENS_KEY = re.compile(r'^(allow_vocab|extra_vocab|allow_proof|triggers):\s*(.*)$')
+AUTO_MIN_HITS = 3
+
+
+def lens_dirs():
+    """The search path, in order, deduplicated by real path."""
+    raw = [d for d in (os.environ.get('DESLOP_LENS_PATH') or '').split(':') if d.strip()]
+    raw += [LENS_LOCAL_DIR, LENS_DIR]
+    seen, out = set(), []
+    for d in raw:
+        # realpath, so a lenses.local symlink pointing at a directory already on
+        # the path is not listed twice under two names.
+        key = os.path.realpath(d)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(os.path.normpath(d))
+    return out
+
+
+def lens_listing():
+    """[(name, directory)] for every lens on the path. First directory wins."""
+    seen, out = set(), []
+    for d in lens_dirs():
+        try:
+            files = sorted(os.listdir(d))
+        except OSError:
+            continue
+        for f in files:
+            if not f.endswith('.md') or f.startswith('_'):
+                continue
+            name = f[:-3]
+            if name in seen:
+                continue
+            seen.add(name)
+            out.append((name, d))
+    return sorted(out)
+
+
+def lens_names():
+    """Every available lens name, deduplicated across the whole search path."""
+    return [name for name, _ in lens_listing()]
+
+
+def lens_listing_line():
+    """`marketing (lenses), legal (/private/pack)` — names plus where each lives."""
+    return ', '.join(f'{name} ({d})' for name, d in lens_listing()) or 'none'
+
+
+def resolve_lens(name):
+    """The file a lens NAME refers to, or None. A path is used as given."""
+    if name.endswith('.md') or '/' in name or os.sep in name:
+        return name if os.path.isfile(name) else None
+    for d in lens_dirs():
+        path = os.path.join(d, f'{name}.md')
+        if os.path.isfile(path) and os.access(path, os.R_OK):
+            return path
+    return None
+
+
+def read_lens(name):
+    """A lens file as {allow_vocab, extra_vocab, allow_proof, triggers}.
+
+    A lens with no Lint section is legal and changes nothing. A lens with no
+    `triggers:` line simply never auto-selects. A lens that does not exist is an
+    error: silently falling back to marketing would score a contract against a
+    sales catalogue and print CLEAN while doing it.
+    """
+    path = resolve_lens(name)
+    rules = {'allow_vocab': [], 'extra_vocab': [], 'allow_proof': False, 'triggers': []}
+    try:
+        if path is None:
+            raise FileNotFoundError(name)
+        body = read_utf8(path)
+    except (FileNotFoundError, IsADirectoryError, PermissionError):
+        sys.exit(f"deslop: no lens '{name}' (searched: {', '.join(lens_dirs())})\n"
+                 f"deslop: available lenses: {lens_listing_line()}\n"
+                 f"deslop: more lenses (legal, business-eval, editorial, hormozi, utl): {LENS_PACK_URL}")
+
+    inside = False
+    fence = 0
+    for line in body.splitlines():
+        # Frontmatter: the block between the first pair of --- fences. `triggers:`
+        # is read there and nowhere else, so a line of prose cannot arm a lens.
+        if line.strip() == '---' and fence < 2 and not inside:
+            fence += 1
+            continue
+        if re.match(r'^##\s+Lint\s*$', line):
+            inside = True
+            continue
+        m = LENS_KEY.match(line)
+        if inside and line.startswith('## '):
+            break
+        if not inside and not (fence == 1 and m and m.group(1) == 'triggers'):
+            continue
+        if not m:
+            continue
+        key, value = m.group(1), m.group(2).strip()
+        if key == 'allow_proof':
+            rules['allow_proof'] = value.lower() in ('true', 'yes', '1')
+        else:
+            rules[key] = [w.strip() for w in value.split(',') if w.strip()]
+    return rules
+
+
+def merge_lenses(names):
+    """Several lenses as one set of rules.
+
+    Vocabulary unions: a word either lens allows is allowed, a tell either lens
+    adds is a tell. allow_proof is the strict one — every selected lens has to
+    say true, because one lens waiving the proof rule must not waive it for a
+    document being read under a stricter one as well.
+    """
+    merged = {'allow_vocab': [], 'extra_vocab': [], 'allow_proof': True, 'triggers': []}
+    each = [read_lens(n) for n in names]
+    for key in ('allow_vocab', 'extra_vocab', 'triggers'):
+        seen = set()
+        for rules in each:
+            for word in rules[key]:
+                if word.lower() in seen:
+                    continue
+                seen.add(word.lower())
+                merged[key].append(word)
+    merged['allow_proof'] = bool(each) and all(r['allow_proof'] for r in each)
+    return merged
+
+
+def trigger_pattern(phrase):
+    """A trigger matched as whole words, with any run of whitespace between them."""
+    parts = [re.escape(p) for p in phrase.lower().split()]
+    if not parts:
+        return None
+    return re.compile(r'(?<!\w)' + r'\s+'.join(parts) + r'(?!\w)', re.I)
+
+
+def trigger_scores(text):
+    """[(name, hits)] for every lens that declares triggers, best first."""
+    scored = []
+    for name, _ in lens_listing():
+        triggers = read_lens(name)['triggers']
+        if not triggers:
+            continue
+        hits = 0
+        for phrase in triggers:
+            pat = trigger_pattern(phrase)
+            if pat is not None:
+                hits += len(pat.findall(text))
+        if hits:
+            scored.append((name, hits))
+    return sorted(scored, key=lambda pair: (-pair[1], pair[0]))
+
+
+def auto_lenses(text):
+    """(names, note) — every lens over the trigger floor, or marketing.
+
+    Auto is the mechanical fallback for shell use. A model reading the draft picks
+    better than a word count does, so it should name the lens itself when it can.
+    """
+    scored = trigger_scores(text)
+    picked = [(name, hits) for name, hits in scored if hits >= AUTO_MIN_HITS]
+    if picked:
+        return ([name for name, _ in picked],
+                ', '.join(f'{name} ({hits})' for name, hits in picked))
+    return ([LENS_DEFAULT],
+            f'{LENS_DEFAULT} (fallback, no lens reached {AUTO_MIN_HITS} trigger hits)')
+
+
+def lens_vocab(rules):
+    """The two catalogues as this lens wants them.
+
+    allow_vocab is matched against the catalogue ENTRY, case-insensitively, so
+    `allow_vocab: harness the power` drops that exact entry and leaves the rest.
+    extra_vocab joins the exact list, never the root list: a lens author writing
+    `extra_vocab: party` should not also silence `partial`.
+    """
+    allowed = {w.lower() for w in rules['allow_vocab']}
+    vocab = [w for w in VOCAB if w.lower() not in allowed]
+    exact = [w for w in VOCAB_EXACT if w.lower() not in allowed]
+    exact += [w for w in rules['extra_vocab'] if w.lower() not in allowed]
+    return vocab, exact
+
+
 def markdown_prose(md):
     """The prose of a Markdown file, with the specimens removed.
 
@@ -188,6 +404,10 @@ def markdown_prose(md):
     single rule.
     """
     md = re.sub(r'```.*?```', ' ', md, flags=re.S)
+    # A lens file declares its vocabulary on bare `allow_vocab:` / `extra_vocab:`
+    # lines that cannot be backticked (the lens parser reads them raw). They are
+    # specimens too, so they come out here rather than scoring every lens file red.
+    md = re.sub(r'^\s*(?:allow_vocab|extra_vocab|allow_proof|triggers):.*$', ' ', md, flags=re.M)
     md = re.sub(r'!\[[^\]]*\]\([^)]*\)', ' . ', md)
     md = re.sub(r'\[([^\]]*)\]\([^)]*\)', r'\1', md)
     # Stand-ins, not deletions. Removing `[needs number]` outright welds
@@ -208,16 +428,21 @@ def markdown_prose(md):
     return normalise(md)
 
 
-def audit(text):
+def audit(text, vocab=None, vocab_exact=None):
+    # The catalogues are arguments so a lens can hand in its own pair. Everything
+    # else is fixed: the same five checks run whatever the lens.
+    vocab = VOCAB if vocab is None else vocab
+    vocab_exact = VOCAB_EXACT if vocab_exact is None else vocab_exact
+
     hits = {'vocab': [], 'phrases': [], 'punctuation': [], 'rhythm': [], 'proof': []}
     low = text.lower()
 
-    for w in VOCAB:
+    for w in vocab:
         n = len(re.findall(_root_pattern(w), low))
         if n:
             hits['vocab'].append((w, n))
 
-    for w in VOCAB_EXACT:
+    for w in vocab_exact:
         n = len(re.findall(rf"(?<!\w){re.escape(w)}(?!\w)", low))
         if n:
             hits['vocab'].append((w, n))
@@ -331,6 +556,25 @@ if __name__ == '__main__':
     as_md = '--markdown' in args
     args = [a for a in args if a != '--markdown']
 
+    lens_arg = os.environ.get('DESLOP_LENS') or LENS_DEFAULT
+    if '--lens' in args:
+        i = args.index('--lens')
+        if i + 1 >= len(args):
+            sys.exit('deslop: --lens needs a lens name')
+        lens_arg = args[i + 1]
+        del args[i:i + 2]
+
+    # --pick-lenses answers "which lenses does this draft want?" and nothing else.
+    # cleanse.sh shells out to it for `--lens auto`, because picking a lens is the
+    # one part of resolution that needs to read the draft.
+    pick_only = '--pick-lenses' in args
+    args = [a for a in args if a != '--pick-lenses']
+
+    # Stripped before the file/--text dispatch, so `--lens legal page.md` still
+    # reads page.md as markdown and does not mistake the lens for the target.
+    if not args:
+        sys.exit(__doc__)
+
     if args[0] == '--text':
         text = ' '.join(args[1:])
         if as_md:
@@ -361,5 +605,29 @@ if __name__ == '__main__':
     if not text.split():
         sys.exit('deslop: no visible copy to score — empty input')
 
+    # `--lens a,b,c` is several lenses at once, in the order given. Order matters
+    # to the cleanse, which tells the model the first listed lens wins a clash.
+    if pick_only or lens_arg.strip() == LENS_AUTO:
+        lens_names_sel, note = auto_lenses(text)
+        if not pick_only:
+            print(f'deslop: auto lens -> {note}', file=sys.stderr)
+    else:
+        lens_names_sel = [n.strip() for n in lens_arg.split(',') if n.strip()]
+    if not lens_names_sel:
+        sys.exit('deslop: --lens needs a lens name')
+
+    labels = [os.path.basename(n)[:-3] if n.endswith('.md') else n
+              for n in lens_names_sel]
+
+    if pick_only:
+        print(','.join(labels))
+        sys.exit(0)
+
+    lens = merge_lenses(lens_names_sel)
+    allow_proof = allow_proof or lens['allow_proof']
+    vocab, vocab_exact = lens_vocab(lens)
+
     print(f'{len(text.split())} words of visible copy\n')
-    sys.exit(0 if report(audit(text), allow_proof=allow_proof) == 5 else 1)
+    hits = audit(text, vocab=vocab, vocab_exact=vocab_exact)
+    sys.exit(0 if report(hits, label=f'lens: {" + ".join(labels)}',
+                         allow_proof=allow_proof) == 5 else 1)

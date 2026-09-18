@@ -13,7 +13,7 @@ import os
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from deslop import (VOCAB, VOCAB_EXACT, audit, visible_text, _root_pattern,
-                    markdown_prose, PROOF)
+                    markdown_prose, PROOF, read_lens, lens_vocab, merge_lenses)
 
 fails = []
 
@@ -238,6 +238,322 @@ check('README safe tricolon example stays clean',
       'rhythm' not in groups('Inspection, repair and replacement for homes and commercial buildings.'))
 check('README tricolon example still fires',
       'rhythm' in groups('Trusted, reliable and built to last.'))
+
+# ── lenses: the catalogue moves, the five checks do not ─────────────────────
+# The lens files are written here rather than read out of lenses/, so this suite
+# does not break when somebody adds, renames or edits a shipped lens.
+_lens_dir = tempfile.mkdtemp()
+
+
+def write_lens(name, body):
+    path = os.path.join(_lens_dir, name)
+    with open(path, 'w', encoding='utf-8') as fh:
+        fh.write(body)
+    return path
+
+
+def deslop_cli(*argv, **env):
+    return subprocess.run([sys.executable, f'{here}/deslop.py', *argv],
+                          capture_output=True, text=True, encoding='utf-8',
+                          errors='replace', env={**os.environ, **env})
+
+
+LENS_FULL = write_lens('full.md', '''---
+name: full
+---
+
+## Cleanse overlay
+
+REGISTER: a lens written by the test suite.
+
+## Lint
+
+allow_vocab: seamless, journey
+extra_vocab: fully baked, widget wrangler
+allow_proof: false
+''')
+
+LENS_BARE = write_lens('bare.md', '''---
+name: bare
+---
+
+## Cleanse overlay
+
+REGISTER: a lens with no Lint section at all.
+''')
+
+LENS_LOOSE = write_lens('loose.md', '''---
+name: loose
+---
+
+## Lint
+
+allow_proof: true
+''')
+
+rules = read_lens(LENS_FULL)
+check('allow_vocab parsed', rules['allow_vocab'] == ['seamless', 'journey'], rules)
+check('extra_vocab parsed', rules['extra_vocab'] == ['fully baked', 'widget wrangler'], rules)
+check('allow_proof parsed as false', rules['allow_proof'] is False, rules)
+
+lv, lve = lens_vocab(rules)
+check('allow_vocab drops a root-list entry', 'seamless' not in lv)
+check('allow_vocab drops an exact-list entry', 'journey' not in lve)
+check('allow_vocab leaves the rest of the catalogue', 'robust' in lv and 'crafted' in lve)
+check('extra_vocab lands on the exact list', 'widget wrangler' in lve)
+# Exact, like VOCAB_EXACT. A lens author naming one phrase has not signed up for
+# every word that starts with it.
+check('extra_vocab does not stem',
+      not audit('The widget wranglers of Leeds.', vocab=lv, vocab_exact=lve)['vocab'])
+
+slop = 'Our seamless platform ships on Friday.'
+r = deslop_cli('--lens', LENS_FULL, '--text', slop)
+check('allow_vocab suppresses a catalogue hit', r.returncode == 0, r.stdout[:200])
+r = deslop_cli('--text', slop)
+check('the same line without the lens still fails', r.returncode != 0, r.stdout[:200])
+
+extra = 'The widget wrangler arrives on Friday.'
+r = deslop_cli('--lens', LENS_FULL, '--text', extra)
+check('extra_vocab fires', r.returncode != 0 and 'widget wrangler' in r.stdout, r.stdout[:200])
+r = deslop_cli('--text', extra)
+check('extra_vocab does not leak into the default lens', r.returncode == 0, r.stdout[:200])
+
+# A lens with no Lint section is legal, and must change nothing at all.
+check('a lens with no Lint section parses empty',
+      read_lens(LENS_BARE) == {'allow_vocab': [], 'extra_vocab': [],
+                               'allow_proof': False, 'triggers': []},
+      read_lens(LENS_BARE))
+r = deslop_cli('--lens', LENS_BARE, '--text', slop)
+check('no Lint section changes nothing', r.returncode != 0 and 'seamless' in r.stdout, r.stdout[:200])
+check('the report names the lens', 'lens: bare' in r.stdout, r.stdout[:200])
+
+r = deslop_cli('--lens', LENS_LOOSE, '--text', 'Trusted by 10,000 teams.')
+check('lens allow_proof drops the proof rule', r.returncode == 0, r.stdout[:200])
+check('lens allow_proof still prints the hit', '10,000 teams' in r.stdout, r.stdout[:200])
+
+r = deslop_cli('--text', slop, DESLOP_LENS=LENS_FULL)
+check('DESLOP_LENS selects the lens', r.returncode == 0, r.stdout[:200])
+
+# An unknown lens is an error. Falling back to the default would score a document
+# against the wrong catalogue and print CLEAN while doing it.
+r = deslop_cli('--lens', 'no-such-lens', '--text', 'Six nails per shingle.')
+check('unknown lens exits non-zero', r.returncode != 0, f'exit {r.returncode}')
+check('unknown lens does not traceback', 'Traceback' not in r.stderr, r.stderr[:120])
+check('unknown lens lists what is available', 'available lenses' in r.stderr, r.stderr[:160])
+check('unknown lens lists the default lens', 'marketing' in r.stderr, r.stderr[:160])
+r = deslop_cli('--lens')
+check('--lens with no name exits non-zero', r.returncode != 0, f'exit {r.returncode}')
+
+# ── the search path: DESLOP_LENS_PATH, then lenses.local/, then lenses/ ──────
+# A lens NAME is resolved by searching directories in order, so a private pack of
+# lenses can live outside this repo and still be selected by name. These dirs are
+# built here, not in the repo, so the suite proves the search and not the checkout.
+_path_a = tempfile.mkdtemp()
+_path_b = tempfile.mkdtemp()
+
+
+def write_at(directory, name, body):
+    path = os.path.join(directory, name)
+    with open(path, 'w', encoding='utf-8') as fh:
+        fh.write(body)
+    return path
+
+
+write_at(_path_a, 'private.md', '''---
+name: private
+---
+
+## Lint
+
+allow_vocab: seamless
+''')
+# Same NAME in both directories, different rules. The first directory must win.
+write_at(_path_a, 'clash.md', '''---
+name: clash
+---
+
+## Lint
+
+allow_vocab: seamless
+''')
+write_at(_path_b, 'clash.md', '''---
+name: clash
+---
+
+## Lint
+
+extra_vocab: widget wrangler
+''')
+
+r = deslop_cli('--lens', 'private', '--text', slop, DESLOP_LENS_PATH=_path_a)
+check('a lens on DESLOP_LENS_PATH resolves by name', r.returncode == 0, r.stdout[:200])
+r = deslop_cli('--lens', 'private', '--text', slop)
+check('a lens off the path is not found', r.returncode != 0, r.stdout[:200])
+check('a lens off the path says where it searched', 'searched' in r.stderr, r.stderr[:200])
+
+r = deslop_cli('--lens', 'clash', '--text', slop,
+               DESLOP_LENS_PATH=f'{_path_a}:{_path_b}')
+check('first directory on the path wins', r.returncode == 0, r.stdout[:200])
+r = deslop_cli('--lens', 'clash', '--text', slop,
+               DESLOP_LENS_PATH=f'{_path_b}:{_path_a}')
+check('reversing the path reverses which lens wins', r.returncode != 0, r.stdout[:200])
+
+# The listing merges every directory and says which one each lens came from, so a
+# name clash is visible rather than mysterious.
+r = deslop_cli('--lens', 'no-such-lens', '--text', slop, DESLOP_LENS_PATH=_path_a)
+check('the listing includes a path lens', 'private' in r.stderr, r.stderr[:400])
+check('the listing includes a shipped lens', 'marketing' in r.stderr, r.stderr[:400])
+check('the listing names the directory each lens came from',
+      f'private ({_path_a})' in r.stderr, r.stderr[:400])
+
+# ── several lenses at once ──────────────────────────────────────────────────
+LENS_A = write_lens('multi-a.md', '''---
+name: multi-a
+---
+
+## Lint
+
+allow_vocab: seamless
+extra_vocab: widget wrangler
+allow_proof: true
+''')
+LENS_B = write_lens('multi-b.md', '''---
+name: multi-b
+---
+
+## Lint
+
+allow_vocab: robust
+extra_vocab: fully baked
+allow_proof: true
+''')
+LENS_C = write_lens('multi-c.md', '''---
+name: multi-c
+---
+
+## Lint
+
+allow_proof: false
+''')
+
+merged = merge_lenses([LENS_A, LENS_B])
+check('allow_vocab unions across lenses',
+      merged['allow_vocab'] == ['seamless', 'robust'], merged)
+check('extra_vocab unions across lenses',
+      merged['extra_vocab'] == ['widget wrangler', 'fully baked'], merged)
+check('the union is deduplicated',
+      merge_lenses([LENS_A, LENS_A])['extra_vocab'] == ['widget wrangler'],
+      merge_lenses([LENS_A, LENS_A]))
+check('allow_proof holds when every lens says true',
+      merge_lenses([LENS_A, LENS_B])['allow_proof'] is True)
+check('one strict lens is enough to keep the proof rule',
+      merge_lenses([LENS_A, LENS_C])['allow_proof'] is False)
+
+r = deslop_cli('--lens', f'{LENS_A},{LENS_B}', '--text',
+               'Our seamless and robust platform ships on Friday.')
+check('both allow_vocab lists apply at once', r.returncode == 0, r.stdout[:200])
+check('the header names both lenses in order',
+      'lens: multi-a + multi-b' in r.stdout, r.stdout[:200])
+r = deslop_cli('--lens', f'{LENS_B},{LENS_A}', '--text', slop)
+check('the header keeps the order given',
+      'lens: multi-b + multi-a' in r.stdout, r.stdout[:200])
+
+r = deslop_cli('--lens', f'{LENS_A},{LENS_B}', '--text',
+               'The widget wrangler arrived fully baked on Friday.')
+check('extra_vocab from either lens fires',
+      'widget wrangler' in r.stdout and 'fully baked' in r.stdout, r.stdout[:300])
+
+r = deslop_cli('--lens', f'{LENS_A},{LENS_B}', '--text', 'Trusted by 10,000 teams.')
+check('two waiving lenses waive the proof rule', r.returncode == 0, r.stdout[:200])
+r = deslop_cli('--lens', f'{LENS_A},{LENS_C}', '--text', 'Trusted by 10,000 teams.')
+check('one strict lens keeps the proof rule at the CLI',
+      r.returncode != 0, r.stdout[:200])
+
+# ── auto selection by trigger words ─────────────────────────────────────────
+_auto_dir = tempfile.mkdtemp()
+write_at(_auto_dir, 'loud.md', '''---
+name: loud
+triggers: quarterly filing, escrow, indemnity clause
+---
+
+## Lint
+
+allow_proof: true
+''')
+write_at(_auto_dir, 'quiet.md', '''---
+name: quiet
+triggers: cadence review, sprint burndown
+---
+
+## Lint
+''')
+write_at(_auto_dir, 'silent.md', '''---
+name: silent
+---
+
+## Lint
+''')
+
+# Three hits for `loud`, two for `quiet`, none for `silent`. Only `loud` clears.
+AUTO_TEXT = ('The quarterly filing lists the escrow account and the indemnity clause. '
+             'A cadence review follows the second cadence review.')
+r = deslop_cli('--pick-lenses', '--text', AUTO_TEXT, DESLOP_LENS_PATH=_auto_dir)
+check('--pick-lenses prints only the selection',
+      r.stdout.strip() == 'loud', repr(r.stdout))
+check('--pick-lenses exits 0', r.returncode == 0, f'exit {r.returncode}')
+check('a lens two hits short is not selected', 'quiet' not in r.stdout, r.stdout)
+check('a lens with no triggers never auto-selects', 'silent' not in r.stdout, r.stdout)
+
+r = deslop_cli('--lens', 'auto', '--text', AUTO_TEXT, DESLOP_LENS_PATH=_auto_dir)
+check('--lens auto lints under the lens it chose',
+      'lens: loud' in r.stdout, r.stdout[:200])
+check('--lens auto reports the choice and the count on stderr',
+      'deslop: auto lens -> loud (3)' in r.stderr, r.stderr[:200])
+
+# Two lenses over the floor come back in hit order, loudest first.
+write_at(_auto_dir, 'louder.md', '''---
+name: louder
+triggers: escrow
+---
+
+## Lint
+''')
+BOTH = ('escrow escrow escrow escrow. The quarterly filing names the indemnity clause '
+        'for the escrow account.')
+r = deslop_cli('--pick-lenses', '--text', BOTH, DESLOP_LENS_PATH=_auto_dir)
+check('several lenses over the floor come back comma-separated, loudest first',
+      r.stdout.strip() == 'loud,louder', repr(r.stdout))
+
+r = deslop_cli('--pick-lenses', '--text', 'A quiet note about the weather in Leeds.',
+               DESLOP_LENS_PATH=_auto_dir)
+check('nothing triggered falls back to marketing',
+      r.stdout.strip() == 'marketing', repr(r.stdout))
+
+# Triggers are whole words or whole phrases, never substrings. Substring matching
+# would score this line at four hits and select `exactly`; whole-word matching
+# scores it at one, which is under the floor, so the fallback answers instead.
+write_at(_auto_dir, 'exactly.md', '''---
+name: exactly
+triggers: gasket, flywheel
+---
+
+## Lint
+''')
+r = deslop_cli('--pick-lenses', '--text',
+               'Gasketing gaskets aside, the gasket and the flywheels.',
+               DESLOP_LENS_PATH=_auto_dir)
+check('a trigger does not match inside a longer word',
+      r.stdout.strip() == 'marketing', repr(r.stdout))
+r = deslop_cli('--pick-lenses', '--text',
+               'The gasket, a gasket, another gasket.', DESLOP_LENS_PATH=_auto_dir)
+check('the same trigger fires as a whole word',
+      r.stdout.strip() == 'exactly', repr(r.stdout))
+
+# The shipped marketing lens declares triggers, and they work.
+r = deslop_cli('--pick-lenses', '--text',
+               'The landing page hero needs a pricing block and a call to action.')
+check('the shipped marketing lens auto-selects on its own triggers',
+      r.stdout.strip() == 'marketing', repr(r.stdout))
 
 if fails:
     print(f'{len(fails)} FAILED\n')
